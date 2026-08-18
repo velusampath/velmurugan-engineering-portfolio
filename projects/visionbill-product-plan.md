@@ -279,8 +279,231 @@ The bill logic does not change: list of barcodes in → grouped lines out → pa
 
 That is the whole tray-bill product for V1: **tray holds the goods, scanner identifies, software makes one invoice.**
 
+---
 
-Do not make this only:
+## How tray billing works in code
+
+The POS never has a `Tray` table. A tray bill **is** a `sales` row with `status = draft`. Each beep is `POST /bills/{id}/items` with a barcode. Pay is `POST /bills/{id}/pay`.
+
+### Call sequence (Flutter / React → FastAPI)
+
+```text
+1. POST /auth/login
+      { "email": "cashier@store.com", "password": "…" }
+   ←  access_token, refresh_token
+
+2. POST /bills
+      { "customer_id": null }
+   ←  { "id": "sale-uuid", "bill_number": "VB-CHN-000041", "status": "draft", "items": [] }
+
+3. For every beep on the tray (scanner types into a text field, then submit):
+   POST /bills/sale-uuid/items
+      { "barcode": "890123000001", "quantity": 1 }
+   ←  updated sale with grouped lines (Coke × 1, then × 2, then × 3…)
+
+4. POST /bills/sale-uuid/pay
+      { "method": "upi", "amount": 460.00, "reference": "UPI123" }
+   ←  { "status": "paid", "items": […], "payments": […] }
+```
+
+USB scanners behave as a keyboard: they dump `890123000001` + Enter into the focused input. Flutter/React does not talk to USB directly. It just sends that string to the API.
+
+### What the backend does on each beep
+
+```python
+# app/services/barcode_service.py
+def find_product_by_barcode(db, tenant_id, barcode: str) -> Product | None:
+    row = db.scalar(
+        select(ProductBarcode)
+        .options(selectinload(ProductBarcode.product))
+        .where(
+            ProductBarcode.tenant_id == tenant_id,
+            ProductBarcode.barcode == barcode,
+        )
+    )
+    return None if row is None else row.product
+```
+
+```python
+# app/api/bills.py  — POST /bills/{bill_id}/items
+def add_item(bill_id, payload, user, db):
+    sale = get_draft_sale(db, user, bill_id)          # same tenant, status=draft
+    product = find_product_by_barcode(db, user.tenant_id, payload.barcode)
+    if product is None:
+        raise HTTPException(404, "Barcode not found")
+
+    existing = next(
+        (line for line in sale.items if line.product_id == product.id),
+        None,
+    )
+    if existing:
+        existing.quantity += payload.quantity         # same tray SKU → qty++
+    else:
+        sale.items.append(SaleItem(
+            product_id=product.id,
+            barcode=payload.barcode,
+            name_snapshot=product.name,              # freeze name/price on the bill
+            quantity=payload.quantity,
+            unit_price=product.selling_price,
+            tax_rate=product.tax_rate,
+            identification_method="barcode",
+            confidence=1,
+            confirmed=True,
+        ))
+    recompute_totals(sale)                           # subtotal, GST, total
+    db.commit()
+    return sale
+```
+
+```python
+def recompute_totals(sale: Sale) -> None:
+    subtotal = tax = Decimal("0.00")
+    for line in sale.items:
+        base = line.quantity * line.unit_price
+        line_tax = base * line.tax_rate / 100
+        line.line_total = base + line_tax
+        subtotal += base
+        tax += line_tax
+    sale.subtotal = subtotal
+    sale.tax_amount = tax
+    sale.total = subtotal + tax - sale.discount_amount
+```
+
+Same Coke barcode beeped 5 times → **one** `sale_items` row with `quantity = 5`, not five rows. That is how the tray becomes Coke × 5 in code.
+
+### Example JSON after 14 beeps
+
+`GET /bills/sale-uuid`
+
+```json
+{
+  "id": "sale-uuid",
+  "bill_number": "VB-CHN-000041",
+  "status": "draft",
+  "subtotal": "460.00",
+  "tax_amount": "23.00",
+  "total": "483.00",
+  "items": [
+    {
+      "product_id": "…",
+      "barcode": "890123000001",
+      "name_snapshot": "Coke 500ml",
+      "quantity": 5,
+      "unit_price": "40.00",
+      "line_total": "210.00"
+    },
+    {
+      "barcode": "890123000002",
+      "name_snapshot": "Pepsi 500ml",
+      "quantity": 3,
+      "unit_price": "40.00",
+      "line_total": "126.00"
+    }
+  ]
+}
+```
+
+### What pay does in code
+
+```python
+# POST /bills/{bill_id}/pay
+def pay_bill(bill_id, payload, user, db):
+    sale = get_draft_sale(db, user, bill_id)
+    if not sale.items:
+        raise HTTPException(400, "Empty bill")
+
+    sale.payments.append(Payment(
+        method=payload.method,          # cash | upi | card
+        amount=payload.amount or sale.total,
+        reference=payload.reference,
+    ))
+
+    for line in sale.items:
+        apply_inventory_change(
+            db,
+            user=user,
+            product_id=line.product_id,
+            quantity_delta=-line.quantity,   # Coke −5
+            txn_type="sale",
+            reference_id=sale.id,
+        )
+
+    sale.status = "paid"
+    sale.paid_at = datetime.now(timezone.utc)
+    db.commit()
+    return sale
+```
+
+```python
+# app/services/inventory_service.py
+def apply_inventory_change(db, user, product_id, quantity_delta, txn_type, **_):
+    balance = get_or_create_balance(db, user.tenant_id, user.branch_id, product_id)
+    if balance.quantity + quantity_delta < 0:
+        raise ValueError("Insufficient stock")
+    balance.quantity += quantity_delta
+    db.add(InventoryTransaction(
+        tenant_id=user.tenant_id,
+        branch_id=user.branch_id,
+        product_id=product_id,
+        type=txn_type,
+        quantity_delta=quantity_delta,
+        reference_type="sale",
+    ))
+```
+
+Stock is **not** `product.stock -= 1`. It is a ledger row plus a branch balance.
+
+### Flutter / React (scanner input)
+
+```dart
+// Flutter: USB scanner sends digits + Enter into this field
+onSubmitted: (barcode) async {
+  final bill = await api.addBillItem(
+    billId: currentBill.id,
+    barcode: barcode.trim(),
+    quantity: 1,
+  );
+  setState(() => currentBill = bill); // UI shows Coke × 5
+}
+```
+
+```ts
+// React New Bill page
+async function onBarcodeEnter(barcode: string) {
+  const bill = await api.post(`/bills/${billId}/items`, {
+    barcode,
+    quantity: 1,
+  });
+  setBill(bill);
+}
+```
+
+### Database writes for one tray (Coke × 5 then pay)
+
+| Table | What gets written |
+| --- | --- |
+| `sales` | one row, draft then `paid` |
+| `sale_items` | one Coke row, `quantity` 1→2→3→4→5 |
+| `payments` | one row on pay |
+| `inventory_transactions` | Coke `sale` −5 (and Pepsi −3, …) |
+| `inventory_balances` | Coke `quantity` decreased by 5 |
+
+### Files that own this logic
+
+```text
+backend/app/api/bills.py              create bill, add item, pay
+backend/app/services/barcode_service.py   barcode → Product
+backend/app/services/billing_service.py   qty group, totals, complete sale
+backend/app/services/inventory_service.py ledger + balance
+dashboard/src/pages/NewBill.tsx        barcode input + cart + pay
+mobile/lib/screens/new_bill.dart       same on Flutter
+```
+
+There is no `identifyTray()` function. Tray billing in code is: **create draft sale → loop barcode lookup and qty++ → pay → stock ledger.**
+
+---
+
+## Architecture I recommend
 
 ```
 Flutter → Python API → PostgreSQL
