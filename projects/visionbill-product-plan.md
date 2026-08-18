@@ -76,7 +76,76 @@ Identification order (never AI-only):
 
 Phase 2 (multi-barcode from one photo) is the first real differentiator. Full rack recognition is Phase 3+, not the MVP.
 
+**If we do not want a custom camera product:** do not invent vision. Use software that already exists. Tray + many products is already solved in shops as **barcode POS + scanner**. Identity is always: barcode number → product master → bill. The software names are below.
+
 ---
+
+## Existing software products (check first — no custom camera)
+
+You do **not** need to build a camera AI product to bill a tray of items. That software already exists in three layers.
+
+### 1. Billing / POS software (this is the product shops already use)
+
+These identify a product **without a camera**: USB/Bluetooth barcode gun (or phone barcode SDK) → software looks up SKU → adds the line → GST bill → stock out.
+
+Put 14 items on a tray. Cashier beeps each barcode. Software builds Coke × 5, Pepsi × 3, etc. as the same codes are scanned again (qty +1).
+
+| Software | What it is | How it identifies the product |
+| --- | --- | --- |
+| **Vyapar** | India SMB POS + GST + inventory | Barcode scan / search → product master |
+| **BUSY** | India retail billing + accounting | Barcode billing, variants, multi-store |
+| **GoFrugal** (RetailEasy, GoBill) | India retail / supermarket POS | USB, Bluetooth, or phone barcode → cart |
+| **Marg ERP** | India GST billing + inventory + barcode labels | Scan or pick item, auto price + GST |
+| **Petpooja / Posist** | India restaurant POS | Menu item tap / KOTs (food tray is usually not barcode) |
+| **Shopify POS / Square** | Global retail POS | Barcode to variant, payments, stock |
+
+These are the **software products** for “tray has many products → make a bill.” They already do product master, barcode, cart, invoice, inventory. Building another Vyapar-class app is a POS play, not a camera play.
+
+### 2. Ready barcode software (many codes at once, still not custom AI)
+
+If the goal is “do not scan each pack by hand” **without building YOLO**, license or embed software that already reads many barcodes:
+
+| Software | What it does |
+| --- | --- |
+| **Scandit** (MatrixScan Batch / Count) | One view, all visible barcodes; Flutter/Android/iOS SDK |
+| **Dynamsoft Barcode Reader / Batch Scanner** | Many barcodes in one pass / many frames |
+| **Google ML Kit Barcode Scanning** | Free on-device; can return multiple barcodes in a frame |
+| **ZXing / ZBar / OpenCV** | Open-source decode; more DIY |
+
+This software still uses a phone or scanner imager, but **you do not write camera AI**. You get a list of barcode strings, then your POS looks them up — same as Vyapar.
+
+### 3. Counter hardware + any POS (supermarket tray / platter)
+
+Shops that pass items over a glass tray already use **bioptic scanners**, not a custom app:
+
+| Hardware (works with POS software) | What it does |
+| --- | --- |
+| **Datalogic Magellan** (9300i / 9600i / 9900i) | In-counter platter; reads barcode as items move over the tray |
+| **Zebra / Honeywell** handheld or presentation scanners | Beep one code into whatever POS is open |
+
+The scanner types numbers into the POS (like a keyboard). **Vyapar, Marg, GoFrugal, or our FastAPI** can all receive that. Identity is still barcode → product table.
+
+### 4. Full “put the tray, don’t scan” products (closed systems)
+
+These exist, but they **are** camera/vision kiosks, not a Python POS you assemble:
+
+| Product | Note |
+| --- | --- |
+| **Mashgin** | Tray/kiosk; 3D cameras identify items; integrates with existing POS; not a DIY stack |
+| **Amazon Just Walk Out, Grabango, Trigo** | Whole-store cashierless; huge install, not an SMB billing app |
+
+Do not try to recreate Mashgin in V1.
+
+### What this means for us
+
+| Goal | Software to use / copy | Custom camera? |
+| --- | --- | --- |
+| Bill a tray of known barcode products | Vyapar / Busy / GoFrugal / Marg pattern, or our FastAPI POS + USB gun | No |
+| Many barcodes in one go | Scandit or ML Kit → same product lookup | No custom model |
+| Identify packs with no barcode | Mashgin-class, or later our catalog vision | Yes, later only |
+
+**Recommendation:** treat **existing POS software** as the baseline. V1 should be that class of product (product master + barcode + tray bill + inventory). For many items on one tray, use a **barcode scanner** (or Scandit/ML Kit). Do not start by building a camera product — those software products already own the shop counter.
+
 
 ## Architecture I recommend
 
