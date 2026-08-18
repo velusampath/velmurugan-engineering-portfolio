@@ -14,7 +14,7 @@ Build this. Do not build it as a normal barcode-billing app only.
 
 The bigger product is:
 
-> Scan the entire rack / cart once → identify multiple products → automatically create the bill.
+> Put many products on a tray → scan the tray once → identify each product → automatically create the bill.
 
 Keep your stack:
 
@@ -41,8 +41,9 @@ A rack has 5 × Coke 500ml, 3 × Pepsi 500ml, 4 × Lays, 2 × biscuits.
 Instead of 14 individual scans:
 
 ```
-Camera scan
-    → AI detects 14 products
+Tray of mixed products
+    → Camera scan
+    → AI detects 14 products on the tray
     → Coke × 5, Pepsi × 3, Lays × 4, Biscuits × 2
     → ₹ total
 ```
@@ -267,146 +268,119 @@ Do not require special “AI cameras” in V1. A normal Android/iPhone camera an
 
 ---
 
-## How we identify many products on one whole rack
+## How we identify many products on one tray
 
-We never treat the rack photo as one product. We **split the image into items**, identify **each item**, then **group duplicates as quantity**.
+The real billing scene is a **tray** (checkout tray / basket / flat plate) with **many mixed products** on it. One camera looks down at that tray. We still do not name the tray. We find **each product on the tray**, then count.
 
 ```
-Whole rack / cart in front of camera
+Customer / cashier puts items on the TRAY
             │
             ▼
-     One (or a few) frames
+     Camera above the tray (or phone)
             │
             ▼
-   ┌────────┴────────┐
-   │  FIND each item │   ← detection, not billing yet
-   └────────┬────────┘
+   Find every product on the tray
             │
-     14 boxes / 14 barcodes
+     14 packs = 14 boxes (or 14 barcodes)
             │
             ▼
-   For EACH box, identify
-            │
+   Identify EACH pack
      barcode → OCR → image match → confirm
             │
             ▼
-   Group same SKU
-            │
-     Coke 500ml × 5
-     Pepsi 500ml × 3
-     Lays × 4
-     Biscuits × 2
+   Same product on the tray → quantity
+     Coke × 5, Pepsi × 3, Lays × 4, Biscuits × 2
             │
             ▼
-          Cart
+          Bill
 ```
 
-### Step 1 — Capture
-
-Cashier (or customer) places packs on a **scan table / checkout rack** facing the camera, or holds the phone so the cart is in view.
-
-Use a **checkout rack** (items laid out), not a supermarket aisle shelf, for the first versions. On an aisle gondola, packs overlap and barcodes face inward. That is a later, much harder problem.
-
-Good V2/V3 scene:
+### Tray layout (what the camera sees)
 
 ```
-┌─────────────────────────────────────┐
-│           CAMERA (above / phone)    │
-│                                     │
-│   [Coke][Coke][Coke][Coke][Coke]    │
-│   [Pepsi][Pepsi][Pepsi]             │
-│   [Lays][Lays][Lays][Lays]          │
-│   [Biscuit][Biscuit]                │
-└─────────────────────────────────────┘
+              CAMERA
+                 │
+                 ▼
+┌────────────────────────────────────────┐
+│                 TRAY                   │
+│                                        │
+│   Coke   Coke   Pepsi   Lays   Lays    │
+│   Coke   Pepsi  Lays    Biscuit        │
+│   Coke   Pepsi  Lays    Biscuit        │
+│   Coke                                 │
+│                                        │
+└────────────────────────────────────────┘
+                 │
+                 ▼
+        one photo of the tray
 ```
 
-### Step 2 — Find every item (detection)
+Put packs **side by side, not stacked**. Leave a little gap so each pack is its own box. That is how one tray with 10–20 items can become a bill without scanning each barcode by hand.
 
-Two finders run on the same photo:
+This is **not** a supermarket aisle shelf. Aisle racks hide barcodes and stack depth. A checkout **tray** is the product we build first.
 
-| Finder | Output | Phase |
+### Step 1 — Put products on the tray, take one photo
+
+Hardware can be:
+
+- Phone held above the tray (Flutter MVP)
+- Cheap camera on a stand above the tray
+- Later: fixed checkout station with a marked tray area
+
+Flutter or the edge box sends **one tray image** (or a short burst) to the scan API. Billing does not care which camera it was.
+
+### Step 2 — Find every product on the tray
+
+| Finder | What it does on the tray | Phase |
 | --- | --- | --- |
-| **Multi-barcode detector** | List of barcode strings + position in the image | Phase 2 (first whole-rack feature) |
-| **Object detector** (YOLO / RT-DETR) | Bounding boxes: “14 objects here” | Phase 3 |
+| **Multi-barcode** | Reads every barcode facing up | Phase 2 — first tray feature |
+| **Object detector** | Draws a box on each pack (“14 products on this tray”) | Phase 3 |
 
-Barcode finder is enough when codes face the camera. Object finder is needed when the code is on the side or buried.
+Detection only answers: *how many things are on the tray, and where?* It does not yet say Coke or Pepsi.
 
-The model must **not** output `Coke` yet. Detection only answers: *where are the packs?*
+### Step 3 — Identify each pack on the tray
 
-### Step 3 — Identify each crop (recognition)
+For each box / barcode:
 
-For every barcode or every box:
+1. Barcode on that pack → product master (best)  
+2. Else OCR (brand, 500ml)  
+3. Else crop photo vs catalog images (pgvector)  
+4. High score → add; medium → cashier confirms; low → unknown queue  
 
-```
-Crop of one pack
-    1. Decode barcode in that crop     → if hit, done (confidence 1.00)
-    2. OCR brand / size / flavor text  → match catalog name
-    3. Embedding of the crop
-           → pgvector search on product_images
-           → top 5 SKUs with scores
-    4. If score ≥ 0.90 → auto-add
-       If 0.60–0.90   → ask cashier
-       If < 0.60      → Unknown Product Queue
-```
+### Step 4 — Tray becomes quantity lines
 
-Example for one box that has no visible barcode:
+Five Coke boxes on the same tray become **Coke 500ml × 5**, not five separate mystery items.
 
 ```
-Crop → embedding
-  1. Coca Cola 500ml     94%
-  2. Coca Cola 750ml     82%
-  3. Pepsi 500ml         63%
-→ UI: “Is this Coca Cola 500ml?”
+Tray boxes          →  Bill lines
+Coke, Coke, Coke,
+Coke, Coke          →  Coke 500ml     × 5
+Pepsi, Pepsi, Pepsi →  Pepsi 500ml    × 3
+Lays × 4            →  Lays           × 4
+Biscuit × 2         →  Biscuits       × 2
+                    →  ₹ Total
 ```
 
-### Step 4 — Count (quantity)
+### Worked tray example
 
-Quantity is **how many boxes mapped to the same product id**, not a separate “count the Cokes” model at the start.
+Tray has 14 products. One photo.
 
-```
-Box 1  Coke 500ml
-Box 2  Coke 500ml
-Box 3  Coke 500ml
-Box 4  Coke 500ml
-Box 5  Coke 500ml
-Box 6  Pepsi 500ml
-...
-        ↓ group
-Coke 500ml  × 5
-Pepsi 500ml × 3
-Lays        × 4
-Biscuits    × 2
-```
+1. 10 barcodes face the camera → those 10 are identified immediately.  
+2. Detector still sees 14 packs.  
+3. Remaining 4: visual match (2 auto-add, 1 confirm, 1 unknown).  
+4. Cashier confirms the weak one.  
+5. Bill is ready. No 14 hand scans.
 
-If two boxes overlap and the detector merges them, quantity will be wrong. That is why we use confirmation and, later, a scale check.
+### Tray rules (so identity stays correct)
 
-### Worked example
+1. One layer on the tray — do not pile packs on top of each other.  
+2. Same catalog for every tray scan (100–500 enrolled SKUs).  
+3. Barcode wins when it is visible on that pack.  
+4. Each line has its own confidence, not one score for the whole tray.  
+5. Cashier can always add/remove a line if a pack was hidden at the edge.
 
-Rack contains 14 packs. Camera takes one photo.
-
-1. Barcode detector reads 10 codes (4 packs have the code facing away).  
-2. Object detector still finds 14 boxes.  
-3. 10 boxes: identity from barcode (Coke, Pepsi, Lays).  
-4. 4 leftover boxes: visual match → 2 biscuits auto-add at 96%, 1 needs confirm (Coke vs Pepsi 500ml), 1 unknown.  
-5. Cashier taps Confirm on the weak one, or picks the SKU.  
-6. Cart is created. No 14 hand scans.
-
-### What makes whole-rack identity work
-
-1. **Controlled catalog** (100–500 SKUs the shop actually sells), with several photos per SKU.  
-2. **Packs separated enough** that boxes do not sit fully behind each other.  
-3. **Barcode first** on every crop; vision only fills gaps.  
-4. **Line-level confidence**, not one score for the whole rack.  
-5. **Human confirm** for the weak lines so the bill stays correct.
-
-### What we will not promise at the start
-
-- Identifying a deep supermarket aisle from one far photo  
-- Perfect count when packs are stacked 3-deep  
-- Products the merchant never enrolled in the catalog  
-
-First whole-rack product: **one camera image → many barcodes → grouped cart**.  
-Then: leftover packs without barcodes → crop → visual match.
+First tray feature: **one tray photo → many barcodes → grouped bill**.  
+Then: packs on the tray with no visible barcode → crop → visual match.
 
 ---
 
