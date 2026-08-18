@@ -150,6 +150,124 @@ Internet → Load balancer → FastAPI
 
 ---
 
+## How we identify a product with any hardware
+
+Hardware does **not** identify the product. Hardware only **captures a signal**. Identification always happens in software against the merchant **product master**.
+
+That is why one FastAPI pipeline can support a cheap USB scanner today and a rack camera later without changing billing.
+
+```
+ANY HARDWARE
+    → capture signal (barcode number, photo, video, RFID, weight)
+    → normalize to a Scan Event
+    → Identification pipeline
+          1. Barcode lookup
+          2. OCR / packaging text
+          3. Image embedding + pgvector
+          4. AI classification
+          5. Human confirmation
+    → Product ID + qty + confidence
+    → Cart → Invoice
+```
+
+### One Scan Event, many devices
+
+Every device should produce the same payload shape:
+
+```text
+Scan Event
+  source        usb_scanner | bluetooth_scanner | mobile_camera | counter_camera | scale | rfid | typed
+  barcodes[]    decoded EAN/UPC/QR strings (may be empty)
+  image_url     photo/frame if a camera was used
+  crops[]       optional object crops from a rack/cart image
+  weight_grams  optional
+  rfid_tags[]   optional
+  branch_id
+  device_id
+```
+
+Flutter, React, or an edge box only captures. FastAPI / AI workers identify.
+
+### Hardware options
+
+| Hardware | What it captures | How we identify | Accuracy | When to use |
+| --- | --- | --- | --- | --- |
+| **USB / Bluetooth barcode scanner** | One barcode number per beep | `GET /products/barcode/{code}` | Highest | V1 POS, every shop |
+| **Phone camera (Flutter)** | Photo or live frames | Decode barcode(s) in the image; if none, crops → visual match | High if barcode visible | MVP camera path |
+| **Fixed counter / rack camera** | Wide photo or video of many items | Detect all barcodes first; leftover objects → detection + embedding | High for barcodes, medium for vision | Phase 2–3 shop install |
+| **Smart checkout station** | Overhead/side cameras + optional scale | Same pipeline on an **edge PC** (low latency, works if internet drops) | High when hybrid | Phase 5 |
+| **Electronic scale** | Weight | Confirm quantity / catch mismatch after ID (e.g. 5 cans vs 2) | Support signal, not ID | Later |
+| **RFID reader** | Tag IDs on tagged items | Map tag → product | Very high, expensive tagging | Optional, not V1 |
+| **Keyboard / search** | Typed SKU, name, or barcode | Normal product search | Human | Fallback always |
+
+We can accept **any** of these because identification is not tied to one gadget. If a new camera or scanner appears, we only add a capture adapter. Product matching stays the same.
+
+### What happens on each capture
+
+**1. Handheld scanner (simplest, V1)**
+
+```
+Gun beep → 8901234567890
+    → product_barcodes table
+    → Coke 500ml, ₹40
+    → add to cart (confidence 1.00)
+```
+
+No AI. This must work even if cameras fail.
+
+**2. Phone or counter camera, barcodes visible (Phase 2)**
+
+```
+One photo of the rack/cart
+    → barcode detector finds many codes in the frame
+    → 890…790, 890…791, 890…792, …
+    → group identical codes as quantity
+    → lookup each code in product master
+    → cart: Coke × 5, Pepsi × 3, Lays × 4
+```
+
+This is the first “whole rack without scanning each item by hand” feature. Still barcode identity, just many codes at once.
+
+**3. Camera, barcode hidden or not facing us (Phase 3)**
+
+```
+Photo
+    → object detector (YOLO / RT-DETR): 14 boxes
+    → for each box:
+          try barcode in that crop
+          else OCR brand/size text
+          else embedding → pgvector top 5
+    → confidence:
+          ≥ 0.90 auto-add
+          0.60–0.90 cashier confirms
+          < 0.60 unknown queue
+```
+
+Example UI: “Coca Cola 500ml — 97% — Qty 4 — [Confirm] [Change]”
+
+### Rules that keep this reliable on any hardware
+
+1. **Same catalog for every device.** Scanner, phone, and rack camera all look up the same `products` / `product_barcodes` / `product_images`.  
+2. **Barcode wins.** If a device returns a valid barcode, do not override it with AI.  
+3. **Camera is optional.** A shop with only a ₹2,000 USB scanner can still bill.  
+4. **Edge for video.** Live rack cameras should decode on a local box; the API receives barcodes/crops, not 30 fps video.  
+5. **Always allow manual search.** Hardware will miss items. Cashier can type or pick the SKU.  
+6. **Unknown is a feature.** Unreadable packs go to the review queue instead of a wrong bill.
+
+### Recommended hardware by phase
+
+| Phase | Device at the counter | Identity method |
+| --- | --- | --- |
+| V1 | USB/Bluetooth scanner + Flutter phone as backup | Single barcode lookup |
+| V2 | Phone or cheap USB camera on a stand | Multi-barcode from one image |
+| V3 | Fixed 1080p camera above the packing area | Barcode + object crops + visual match |
+| V5 | Checkout station: camera(s) + optional scale + edge PC | Hybrid, mostly automatic |
+
+Do not require special “AI cameras” in V1. A normal Android/iPhone camera and a normal barcode gun are enough to start.
+
+---
+
+
 ## Billing workflow
 
 ```
