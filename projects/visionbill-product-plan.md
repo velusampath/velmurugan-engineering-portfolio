@@ -146,8 +146,139 @@ Do not try to recreate Mashgin in V1.
 
 **Recommendation:** treat **existing POS software** as the baseline. V1 should be that class of product (product master + barcode + tray bill + inventory). For many items on one tray, use a **barcode scanner** (or Scandit/ML Kit). Do not start by building a camera product — those software products already own the shop counter.
 
+---
 
-## Architecture I recommend
+## How tray billing works
+
+A **tray bill** is one invoice for every product sitting on the checkout tray. The tray is only a place to hold items. The software never “sees the tray.” It receives barcodes (or a chosen SKU), looks up the product master, and builds the cart.
+
+```
+1. Start bill
+2. Put products on the tray
+3. Identify each pack (barcode beep, or search)
+4. Same barcode again → quantity +1
+5. Review cart (price, GST, qty)
+6. Take payment
+7. Print / share invoice
+8. Stock goes down
+```
+
+### What is on the counter
+
+```
+  Cashier screen (Flutter or React)     USB / Bluetooth scanner
+                 │                              │
+                 └──────────┬───────────────────┘
+                            ▼
+                    FastAPI  →  PostgreSQL
+                            │
+                    products + barcodes
+                    draft sale (the tray bill)
+                    inventory ledger
+```
+
+- Tray: physical plate with mixed packs  
+- Scanner: types the barcode into the open bill (like a keyboard)  
+- POS: maps that number to name, price, tax  
+- Customer: pays once for the whole tray  
+
+### Cashier flow (V1 — same as Vyapar / Marg)
+
+**Before the first bill:** merchant has already saved products (SKU, barcode, name, MRP, selling price, GST). Without that master, a beep cannot identify anything.
+
+Then, for each customer:
+
+1. Cashier taps **New Bill** (walk-in or selected customer).  
+2. Customer (or cashier) places items **on the tray**.  
+3. Cashier points the scanner at each pack on the tray and beeps.  
+4. Software for each beep:  
+   - read barcode `8901234567890`  
+   - `SELECT product WHERE tenant_id + barcode`  
+   - if found → add line or increase qty  
+   - if not found → “Unknown barcode” (search name, or skip)  
+5. Screen shows the running tray bill.  
+6. Cashier can change qty, delete a line, or search a product with no barcode.  
+7. **Pay** (cash / UPI / card) → invoice number → print.  
+8. Inventory: each sold line writes a **SALE** ledger row and reduces branch stock.
+
+### Worked example
+
+Tray has:
+
+- 5 × Coke 500ml (barcode `890123000001`)  
+- 3 × Pepsi 500ml (`890123000002`)  
+- 4 × Lays (`890123000003`)  
+- 2 × biscuits (`890123000004`)  
+
+Cashier beeps 14 times. Software does **not** store 14 separate mystery items. It groups:
+
+| Product | Barcode | Qty | Rate | Amount |
+| --- | --- | --- | --- | --- |
+| Coke 500ml | 890123000001 | 5 | ₹40 | ₹200 |
+| Pepsi 500ml | 890123000002 | 3 | ₹40 | ₹120 |
+| Lays | 890123000003 | 4 | ₹20 | ₹80 |
+| Biscuits | 890123000004 | 2 | ₹30 | ₹60 |
+| | | | **Total** | **₹460** + GST as configured |
+
+That grouped table **is** the tray bill.
+
+### What the POS screen shows
+
+```
+┌─────────────────────────────────────────┐
+│  Bill VB-CHN-000041        Walk-in      │
+│  Tray items                             │
+│                                         │
+│  Coke 500ml           5 × ₹40    ₹200   │
+│  Pepsi 500ml          3 × ₹40    ₹120   │
+│  Lays                 4 × ₹20     ₹80   │
+│  Biscuits             2 × ₹30     ₹60   │
+│                                         │
+│  Items 14   Subtotal ₹460   GST  ₹…     │
+│  TOTAL ₹…                               │
+│                                         │
+│  [ Pay cash ] [ UPI ] [ Card ]          │
+└─────────────────────────────────────────┘
+```
+
+### How identity works on the tray (no custom camera)
+
+| Action on the tray | Software result |
+| --- | --- |
+| First beep of Coke | New line: Coke × 1 |
+| Second beep of same Coke barcode | Same line: Coke × 2 |
+| Beep of Pepsi | New line: Pepsi × 1 |
+| Pack with no barcode | Cashier searches name / SKU and adds |
+| Unknown barcode | Error + optional review queue |
+
+So “tray of many products” = **many beeps, one bill**. Quantity is “how many times this barcode was seen,” not a camera count.
+
+### Optional faster tray (still not custom AI)
+
+If the shop does not want 14 separate gun beeps:
+
+- **Presentation / bioptic scanner:** slide each pack over the glass tray; POS still gets one barcode per pack.  
+- **Scandit / ML Kit:** one phone view of barcodes facing up → list of codes → same grouping as above.
+
+The bill logic does not change: list of barcodes in → grouped lines out → pay.
+
+### After pay
+
+1. Bill status = `paid`.  
+2. Invoice PDF / thermal print / WhatsApp (later).  
+3. Stock: Coke −5, Pepsi −3, Lays −4, biscuits −2 at that branch.  
+4. Tray is cleared for the next customer. New bill starts empty.
+
+### Rules so the tray bill stays correct
+
+1. Product + barcode must exist **before** the beep.  
+2. One open draft bill per cashier (the current tray).  
+3. Same barcode on the tray always adds qty on the same line.  
+4. Cashier can fix qty if they double-scanned.  
+5. Do not complete payment if a line is still “unknown.”
+
+That is the whole tray-bill product for V1: **tray holds the goods, scanner identifies, software makes one invoice.**
+
 
 Do not make this only:
 
