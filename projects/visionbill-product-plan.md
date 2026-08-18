@@ -1,0 +1,599 @@
+# VisionBill — Suggestion and V1 Plan
+
+This file is the product suggestion and V1 plan only. No application code yet.
+
+**Working name:** VisionBill  
+**Feature name:** Bulk Vision Billing (AI Bulk Checkout)  
+**Positioning:** computer-vision-powered automated checkout and billing — not another barcode-only POS.
+
+---
+
+## My suggestion
+
+Build this. Do not build it as a normal barcode-billing app only.
+
+The bigger product is:
+
+> Scan the entire rack / cart once → identify multiple products → automatically create the bill.
+
+Keep your stack:
+
+| Layer | Choice |
+| --- | --- |
+| Backend / API | Python + FastAPI |
+| Database | PostgreSQL |
+| Web dashboard | React.js + TypeScript |
+| Mobile / POS | Flutter |
+
+Add a separate **AI / computer-vision layer**. Do not put heavy detection inside every FastAPI request.
+
+Use **two billing modes**:
+
+1. **Mode A — Normal barcode billing** (V1)  
+   Barcode → product lookup → add to cart → bill.
+2. **Mode B — AI bulk billing** (V2/V3)  
+   Camera → detect many products → barcode / OCR / visual match → quantities → cart → invoice.
+
+Example of Mode B:
+
+A rack has 5 × Coke 500ml, 3 × Pepsi 500ml, 4 × Lays, 2 × biscuits.
+
+Instead of 14 individual scans:
+
+```
+Camera scan
+    → AI detects 14 products
+    → Coke × 5, Pepsi × 3, Lays × 4, Biscuits × 2
+    → ₹ total
+```
+
+**Do not start with “our AI recognizes any supermarket product.”**  
+Start with a **controlled merchant catalog of 100–500 SKUs** (grocery, FMCG, beverages, snacks, personal care). The merchant uploads name, SKU, barcode, brand, category, MRP, selling price, and product images. AI only searches that catalog.
+
+**Do not trust AI blindly.** Use a confidence system:
+
+- High confidence → auto-add to cart  
+- Medium confidence → cashier confirms  
+- Unknown → **AI Review Queue** (do not discard the crop; it becomes training data)
+
+Identification order (never AI-only):
+
+1. Barcode (most reliable)  
+2. OCR / packaging text  
+3. Product image matching (embedding + pgvector)  
+4. AI classification  
+5. Human confirmation  
+
+**Phased build (this is the realistic path):**
+
+1. POS + inventory + barcode billing  
+2. Camera → many barcodes in one image → automatic cart  
+3. Camera → detect products → recognize known catalog items  
+4. Quantity detection + confidence confirmation  
+5. Fully automated checkout station  
+6. Multi-store SaaS + analytics  
+
+Phase 2 (multi-barcode from one photo) is the first real differentiator. Full rack recognition is Phase 3+, not the MVP.
+
+---
+
+## Architecture I recommend
+
+Do not make this only:
+
+```
+Flutter → Python API → PostgreSQL
+```
+
+Use this:
+
+```
+                    ┌─────────────────┐
+                    │   React Admin   │
+                    │    Dashboard    │
+                    └────────┬────────┘
+                             │
+                    ┌────────▼────────┐
+                    │   Python API    │
+                    │    FastAPI      │
+                    └────────┬────────┘
+                             │
+       ┌─────────────────────┼─────────────────────┐
+       │                     │                     │
+┌──────▼──────┐      ┌───────▼───────┐      ┌──────▼──────┐
+│ PostgreSQL  │      │  AI Service   │      │ Redis/Queue │
+│ + pgvector  │      │ Detection     │      │ Jobs        │
+│ Products    │      │ Recognition   │      │ Processing  │
+│ Inventory   │      │ OCR           │      │             │
+│ Customers   │      │ Barcode       │      │             │
+│ Billing     │      │               │      │             │
+└─────────────┘      └───────────────┘      └─────────────┘
+                             ▲
+                             │
+                    ┌────────┴────────┐
+                    │     Flutter     │
+                    │ Mobile / POS    │
+                    └─────────────────┘
+```
+
+FastAPI stays one ecosystem for V1:
+
+```
+FastAPI
+├── Authentication
+├── Products API
+├── Inventory API
+├── Billing API
+├── Customer API
+├── Payment API
+├── Barcode API
+├── AI scanning API
+└── Reports API
+```
+
+Split the AI service out later. Use workers/queues for vision jobs. Do not run YOLO inside the billing request that creates an invoice.
+
+### Cloud shape (later)
+
+```
+Internet → Load balancer → FastAPI
+                              ├── PostgreSQL + pgvector
+                              ├── Redis
+                              └── AI workers / GPU
+```
+
+### Hardware path
+
+1. **MVP:** phone camera (Flutter) + USB / Bluetooth scanner  
+2. **Shop:** fixed counter / rack camera  
+3. **Differentiator:** smart checkout station + edge agent (do not stream every frame to the cloud)
+
+---
+
+## Billing workflow
+
+```
+START BILL
+    → Select customer (or walk-in)
+    → Scan products
+          ├── Barcode (single)
+          └── AI / bulk scan
+                → Detect objects
+                → Identify products
+                → Calculate quantity
+                → Confidence > threshold?
+                      YES → add item
+                      NO  → manual confirm
+    → CART
+    → PAYMENT
+    → INVOICE
+    → Reduce inventory (ledger)
+```
+
+---
+
+## PostgreSQL schema (V1)
+
+Multi-tenant from day one. Every business table has `tenant_id`. Store operations also have `branch_id`.
+
+A tenant is the company / SaaS account. A branch is a store (Chennai, Bangalore, Madurai).
+
+### Tenancy
+
+```text
+tenants
+  id, name, slug, status, created_at, updated_at
+
+branches
+  id, tenant_id, name, code, city, address, status, created_at, updated_at
+
+users
+  id, tenant_id, branch_id (nullable), email, full_name,
+  hashed_password, role, is_active, created_at, updated_at
+```
+
+Roles: `owner` | `manager` | `cashier` | `admin`.
+
+### Product master (must be strong)
+
+```text
+categories
+  id, tenant_id, name, created_at
+
+brands
+  id, tenant_id, name, created_at
+
+products
+  id
+  tenant_id
+  sku
+  name
+  brand_id
+  category_id
+  unit
+  mrp
+  selling_price
+  purchase_price
+  tax_id / tax_rate
+  hsn_code
+  reorder_level
+  status
+  created_at
+  updated_at
+
+product_barcodes
+  id, tenant_id, product_id, barcode, is_primary
+  UNIQUE (tenant_id, barcode)
+
+product_images
+  id, product_id, image_url, image_type, embedding, created_at
+```
+
+A real store often has **several barcodes for one SKU**. Support that from V1.
+
+`product_images.embedding` is for later visual matching with **pgvector**. Image types: `front`, `side`, `back`, `packaging`.
+
+Visual match later:
+
+```
+Detected crop → embedding → pgvector similarity → top 5 SKUs
+  1. Coca Cola 500ml  94%
+  2. Coca Cola 750ml  82%
+  3. Pepsi 500ml      63%
+→ UI: “Is this Coca Cola 500ml?”
+```
+
+That is better than one giant classification model.
+
+### Inventory ledger (do not do `stock = stock - 1` only)
+
+```text
+inventory_balances
+  id, tenant_id, branch_id, product_id, quantity, updated_at
+  UNIQUE (tenant_id, branch_id, product_id)
+
+inventory_transactions
+  id, tenant_id, branch_id, product_id
+  type              -- purchase | sale | return | adjustment | damage | stock_in | stock_out
+  quantity_delta    -- signed
+  unit_cost
+  reference_type, reference_id
+  notes, created_by, created_at
+```
+
+Current stock = balance row, auditable as the sum of deltas.
+
+### Customers and billing
+
+```text
+customers
+  id, tenant_id, name, phone, email, gstin, address, created_at, updated_at
+
+sales
+  id, tenant_id, branch_id, bill_number, customer_id, cashier_id,
+  scan_session_id, status,          -- draft | confirmed | paid | void
+  subtotal, discount_amount, tax_amount, total,
+  notes, created_at, updated_at, paid_at
+
+sale_items
+  id, sale_id, product_id, barcode, name_snapshot,
+  quantity, unit_price, tax_rate, line_total,
+  identification_method,   -- barcode | ocr | visual | classification | manual
+  confidence, confirmed
+
+payments
+  id, sale_id, method, amount, reference, created_at
+```
+
+### Scanning (AI-ready in V1, vision later)
+
+```text
+scan_sessions
+  id, tenant_id, branch_id, sale_id
+  mode      -- barcode | bulk_barcode | ai_vision
+  status    -- processing | review | applied | cancelled
+  source    -- typed | scanner | mobile_camera | counter_camera | upload
+  image_url, created_by, created_at, updated_at
+
+scan_results
+  id, session_id, detected_barcode, product_id, product_name,
+  quantity, confidence, identification_method,
+  status            -- auto_added | needs_confirm | unknown
+  crop_image_url, candidates_json
+
+ai_review_items     -- Unknown Product Queue
+  id, tenant_id, scan_result_id, crop_image_url,
+  suggested_matches_json,
+  status            -- pending | confirmed | created | dismissed
+  resolved_product_id, created_at, resolved_at
+```
+
+### Confidence rules
+
+| Signal | Score | Action |
+| --- | --- | --- |
+| Exact barcode match | 1.00 | Auto-add |
+| Embedding top-1 ≥ 0.90 | model | Auto-add |
+| 0.60–0.90 | model | Ask cashier |
+| < 0.60 or no match | — | Unknown queue |
+
+Config: `AUTO_ADD_CONFIDENCE` (default 0.90), `CONFIRM_CONFIDENCE` (default 0.60).
+
+---
+
+## FastAPI folder structure (V1)
+
+```text
+backend/
+  app/
+    main.py
+    api/
+      auth.py
+      products.py
+      billing.py
+      inventory.py
+      customers.py
+      stores.py
+      scanning.py
+      review_queue.py
+      reports.py
+    models/
+      identity.py
+      catalog.py
+      inventory.py
+      billing.py
+      scanning.py
+    schemas/
+    services/
+      billing_service.py
+      inventory_service.py
+      barcode_service.py
+      recognition_service.py    # barcode now; OCR/vision later
+    repositories/
+    core/
+      config.py
+      security.py
+      database.py
+  tests/
+```
+
+Keep `recognition_service.py` as a pipeline with stages 1–5. V1 implements barcode only. Later stages plug in without rebuilding cart or invoice.
+
+---
+
+## API map (V1)
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| POST | `/auth/login` | JWT + refresh |
+| POST | `/auth/refresh` | Rotate access token |
+| GET | `/auth/me` | User, tenant, branch |
+| GET | `/dashboard/summary` | Today sales, bills, low stock, pending reviews |
+| GET/POST | `/products` | Product master |
+| GET | `/products/barcode/{code}` | Single-barcode lookup |
+| GET/POST | `/inventory`, `/inventory/adjust` | Balances + ledger |
+| GET/POST | `/customers` | Customer master |
+| POST | `/bills` | Create draft bill |
+| POST | `/bills/{id}/items` | Add line (barcode or product id) |
+| POST | `/bills/{id}/pay` | Payment + complete + stock out |
+| GET | `/bills` | History / invoice |
+| POST | `/scans` | Start session; optional barcode list |
+| POST | `/scans/{id}/barcodes` | Bulk barcodes (Phase 1/2 stand-in for one rack photo) |
+| POST | `/scans/{id}/image` | Phase 2: multi-barcode from photo (not V1) |
+| POST | `/scans/{id}/apply` | Push confirmed lines into the draft bill |
+| GET | `/review-queue` | Unknown products |
+| POST | `/review-queue/{id}/confirm` | Link to existing SKU |
+| POST | `/review-queue/{id}/create-product` | Create SKU from unknown crop |
+
+---
+
+## React admin pages (V1)
+
+React is the business / admin side. V1 can also demo billing here so the product is usable before Flutter is compiled.
+
+```text
+Login
+Dashboard
+│
+├── Sales
+│   ├── Today
+│   ├── New Bill
+│   ├── Bills
+│   ├── Returns
+│   └── Payments
+│
+├── Products
+│   ├── Product Master
+│   ├── Categories
+│   ├── Brands
+│   ├── Barcode
+│   └── Product Images
+│
+├── Inventory
+│   ├── Stock
+│   ├── Stock In
+│   ├── Stock Out
+│   └── Stock Adjustment
+│
+├── AI Scanner
+│   ├── Bulk Scan
+│   ├── Training Data
+│   ├── Product Matching
+│   ├── Accuracy
+│   └── Unrecognized Products   ← Unknown Product Queue
+│
+├── Customers
+├── Suppliers                   ← stub in V1
+├── Reports
+└── Settings
+    ├── Branch
+    └── Users
+```
+
+**New Bill:** walk-in or named customer → add by barcode → optional bulk-scan session → pay cash / UPI / card → invoice.
+
+**Bulk Scan:** paste or scan many barcodes (simulates one rack photo). Group quantities. Flag unknowns.
+
+**Unknown Product Queue:**
+
+```text
+Unknown Product
+[ crop image ]
+Possible matches:
+  Coca Cola 500ml   93%
+  Coca Cola 750ml   81%
+  Pepsi 500ml       64%
+[ Confirm ]  [ Create Product ]
+```
+
+Every correction becomes catalog / training data.
+
+---
+
+## Flutter screens (V1)
+
+Flutter is the **store staff / POS** app, not only a billing screen.
+
+```text
+Login
+Dashboard
+New Bill
+  ├── Barcode Scan
+  ├── AI Bulk Scan
+  └── Cart
+Payment
+Invoice
+Returns
+Stock
+  ├── Check Stock
+  ├── Stock Count
+  ├── Stock Transfer
+  └── Stock Adjustment
+Customers
+Sales History
+Profile
+```
+
+Later: customer mode — customer scans the cart → sees the bill → UPI / card → checkout.
+
+Later still: owner app — today’s sales, profit, top products, low stock, store comparison.
+
+Offline queue (SQLite sync) is important for real shops. **Not V1.** Design APIs so a local queue can replay bills later.
+
+---
+
+## AI stack (when we reach it)
+
+There are three different problems. Do not mix them.
+
+1. **Barcode detection** — find `8901234567890` in the frame → product master. Easiest and most reliable. This is Phase 2.  
+2. **Product detection** — YOLO / RT-DETR: “there are 5 objects.”  
+3. **Product recognition** — “these are Coke 500ml.” Hard. Use embeddings + pgvector against the merchant catalog, not a global classifier.
+
+OCR: PaddleOCR or equivalent.  
+Barcode: ZXing / ML Kit / OpenCV.  
+Do not send every camera frame to the cloud. Prefer an edge agent for the counter camera.
+
+---
+
+## Recommended stack
+
+| Component | Recommendation |
+| --- | --- |
+| Backend | Python + FastAPI |
+| ORM | SQLAlchemy |
+| Database | PostgreSQL |
+| Vector | pgvector |
+| Cache | Redis |
+| Queue | Celery / RQ |
+| Web | React.js + TypeScript |
+| Mobile | Flutter + Dart |
+| Detection | YOLO-class / RT-DETR (Phase 3) |
+| OCR | PaddleOCR (Phase 3) |
+| Barcode | ZXing / ML Kit / OpenCV (Phase 2) |
+| Images | S3-compatible storage (not BLOBs in Postgres) |
+| Auth | JWT + refresh token |
+| API docs | OpenAPI / Swagger |
+| Deploy | Docker |
+| CI | GitHub Actions |
+| Monitoring | Sentry + metrics |
+
+---
+
+## V1 scope vs later
+
+### Build in V1
+
+- Login, tenant, branch, users  
+- Product master, barcodes, images (upload URL / placeholder)  
+- Inventory ledger  
+- Cart, billing, payment, invoice  
+- Single barcode lookup  
+- Bulk barcode **list** → grouped cart (API ready for a camera)  
+- Confidence fields + unknown-product queue (even if only unmatched barcodes hit it)  
+- React admin pages listed above  
+- Flutter screen map (implement after API is stable)
+
+### Do not build in V1
+
+- Full AI product recognition  
+- YOLO / GPU workers  
+- RFID  
+- Self-checkout kiosk  
+- Loyalty, payroll, accounting ERP  
+- Advanced GST automation  
+- Many payment gateways  
+- Offline sync  
+- “Any product in any supermarket”
+
+---
+
+## Roadmap
+
+```text
+                    PRODUCT
+                       │
+          ┌────────────┴────────────┐
+          │                         │
+       POS / Billing            AI Checkout
+          │                         │
+     Barcode Scan             Bulk barcode scan
+          │                         │
+     Inventory                Object detection
+          │                         │
+     Customers                Product recognition
+          │                         │
+     Payments                 Quantity detection
+          │                         │
+     Reports                  Confidence engine
+          │                         │
+          └────────────┬────────────┘
+                       │
+                  SaaS platform
+                       │
+            Retail · Grocery · Supermarket
+```
+
+| Phase | Ship |
+| --- | --- |
+| 1 | POS + inventory + barcode billing |
+| 2 | Camera → multiple barcodes → automatic cart |
+| 3 | Detect + recognize known catalog products when barcode is hidden |
+| 4 | Quantity + confidence confirmation UX |
+| 5 | Automated checkout station |
+| 6 | Multi-store SaaS + analytics |
+
+---
+
+## What to do next (after this plan)
+
+When you want implementation, do it in this order:
+
+1. FastAPI + PostgreSQL schema + seed catalog (100 demo SKUs is enough to think in)  
+2. React: login, products, new bill, barcode add, pay  
+3. Bulk barcode session + unknown queue UI  
+4. Flutter: login, new bill, barcode scan, cart, pay  
+5. Only then: photo → multi-barcode decode  
+6. Only then: embeddings + pgvector + detector
+
+That is the full V1 design (architecture, schema, API layout, React pages, Flutter screens) before coding.
